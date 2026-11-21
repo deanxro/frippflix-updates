@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "appId": "com.dean.plexfiretv",
+  "versionName": "0.8.4.2",
+  "versionCode": 46,
+  "releaseTag": "v0.8.4.2",
+  "releaseUrl": "https://github.com/deanxro/frippflix-updates/releases/tag/v0.8.4.2",
+  "apkUrl": "https://github.com/deanxro/frippflix-updates/releases/download/v0.8.4.2/Frippflix.apk",
+  "apkFileName": "Frippflix.apk",
+  "sha256": "REPLACE_WITH_SHA256_OF_SIGNED_APK",
+  "minimumSupportedVersionCode": 1,
+  "mandatory": false,
+  "releaseNotes": [
+    "Initial public update-channel manifest.",
+    "Publish the first signed APK as a GitHub Release asset before enabling update checks in production."
+  ]
+}
