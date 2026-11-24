@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "publish_release.py"
@@ -13,6 +14,27 @@ spec.loader.exec_module(publisher)
 
 
 class PublisherUnitTests(unittest.TestCase):
+    def test_release_lookup_finds_draft_when_tag_endpoint_returns_404(self):
+        # Exact incident: the authenticated collection contains the draft,
+        # while GET /releases/tags/{tag} is a 404 on this GitHub state.
+        draft = {"id": 9123, "tag_name": "v0.8.4.2", "draft": True, "assets": []}
+        calls = []
+
+        def fake_run(args):
+            calls.append(args)
+            endpoint = " ".join(args)
+            if "/releases/tags/" in endpoint:
+                raise AssertionError("lookup must not rely on the by-tag endpoint")
+            self.assertIn("--paginate", args)
+            self.assertIn("--slurp", args)
+            return json.dumps([[{"id": 1, "tag_name": "v0.7.0", "draft": False}, draft]])
+
+        with mock.patch.object(publisher, "require_tool", return_value="/fake/gh"), \
+                mock.patch.object(publisher, "run", side_effect=fake_run):
+            found = publisher.release("v0.8.4.2")
+        self.assertEqual(found, draft)
+        self.assertEqual(len(calls), 1)
+
     def test_fingerprint_normalization_and_validation(self):
         value = "ab" * 32
         self.assertEqual(publisher.normalize_fp(":".join(value[i:i + 2] for i in range(0, 64, 2))), value.upper())
@@ -42,10 +64,16 @@ class PublisherUnitTests(unittest.TestCase):
             apk = Path(td) / "Frippflix.apk"
             apk.write_bytes(b"synthetic APK asset fixture")
             digest = publisher.sha256(apk)
-            rel = {"tag_name": "v0.8.4.2", "assets": [{"name": "Frippflix.apk", "digest": f"sha256:{digest}"}]}
+            rel = {"tag_name": "v0.8.4.2", "assets": [{"name": "Frippflix.apk", "state": "uploaded", "size": apk.stat().st_size,
+                                                                  "digest": f"sha256:{digest}"}]}
             asset, remote = publisher.verify_release_asset(rel, apk)
             self.assertEqual(asset["name"], "Frippflix.apk")
             self.assertEqual(remote, digest)
+
+    def test_draft_upload_url_is_release_id_bound_and_named_exactly(self):
+        rel = {"id": 9123, "upload_url": "https://uploads.github.com/repos/deanxro/frippflix-updates/releases/9123/assets{?name,label}"}
+        self.assertEqual(publisher.upload_url(rel),
+                         "https://uploads.github.com/repos/deanxro/frippflix-updates/releases/9123/assets?name=Frippflix.apk")
 
     def test_safe_dry_run_with_synthetic_apk_and_command_shims(self):
         with tempfile.TemporaryDirectory() as td:
@@ -72,7 +100,8 @@ show-ref) exit 1;;
 esac''')
             shim("gh", '''case "$1 $2" in
 "api repos/deanxro/frippflix-updates") echo '{"default_branch":"main"}';;
-"api repos/deanxro/frippflix-updates/releases/tags/v0.8.4.2"|"api repos/deanxro/frippflix-updates/git/ref/tags/v0.8.4.2") echo "Not Found" >&2; exit 1;;
+"api --paginate") echo '[[]]';;
+"api repos/deanxro/frippflix-updates/git/ref/tags/v0.8.4.2") echo "Not Found" >&2; exit 1;;
 *) echo "$*" >> "$MUTATION_LOG"; exit 99;;
 esac''')
             apk = temp / "synthetic.apk"

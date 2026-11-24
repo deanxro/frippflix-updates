@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 
 REPO = "deanxro/frippflix-updates"
@@ -135,16 +137,52 @@ def gh_json(args: list[str]) -> dict:
 
 
 def release(tag: str) -> dict | None:
-    p = subprocess.run([require_tool("gh"), "api", f"repos/{REPO}/releases/tags/{tag}"],
+    # The by-tag endpoint omits drafts on some GitHub responses. The releases
+    # collection includes authenticated drafts and supports pagination.
+    try:
+        pages = json.loads(run([require_tool("gh"), "api", "--paginate", "--slurp",
+                                f"repos/{REPO}/releases", "--field", "per_page=100"]))
+    except json.JSONDecodeError as e:
+        raise PublishError("GitHub returned invalid release-list JSON") from e
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise PublishError("GitHub release listing had an unexpected shape; refusing to assume the tag is absent")
+    releases = []
+    for page in pages:
+        releases.extend(page)
+    if any(not isinstance(item, dict) or "tag_name" not in item for item in releases):
+        raise PublishError("GitHub release listing contained incomplete entries; refusing to continue")
+    matches = [item for item in releases if item.get("tag_name") == tag]
+    if len(matches) > 1:
+        raise PublishError(f"GitHub returned duplicate releases for tag {tag}; refusing recovery")
+    return matches[0] if matches else None
+
+
+def release_by_id(release_id: int) -> dict | None:
+    p = subprocess.run([require_tool("gh"), "api", f"repos/{REPO}/releases/{release_id}"],
                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode:
         if "Not Found" in p.stderr or "HTTP 404" in p.stderr:
             return None
-        raise PublishError(f"Cannot inspect GitHub release: {p.stderr.strip()}")
+        raise PublishError(f"Cannot inspect GitHub release ID {release_id}: {p.stderr.strip()}")
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError as e:
-        raise PublishError("GitHub returned invalid release JSON") from e
+        raise PublishError("GitHub returned invalid release JSON by ID") from e
+
+
+def wait_for_release(tag: str, release_id: int | None = None, attempts: int = 6,
+                     interval: float = 1.0) -> dict:
+    """Bounded consistency wait for a release collection entry and its ID endpoint."""
+    for attempt in range(attempts):
+        listed = release(tag)
+        if listed and (release_id is None or listed.get("id") == release_id):
+            detail = release_by_id(int(listed["id"]))
+            if detail and detail.get("tag_name") == tag:
+                return detail
+        if attempt + 1 < attempts:
+            time.sleep(interval)
+    suffix = f" (release ID {release_id})" if release_id is not None else ""
+    raise PublishError(f"Release {tag}{suffix} did not become consistently visible after {attempts} checks; keep the draft and retry --resume")
 
 
 def remote_tag_exists(tag: str) -> bool:
@@ -171,14 +209,18 @@ def verify_release_asset(rel: dict, apk: Path | None, meta: dict | None = None) 
     if not assets:
         raise PublishError("Release has no Frippflix.apk asset")
     asset = assets[0]
+    if asset.get("state") != "uploaded":
+        raise PublishError("Release asset is not in GitHub's uploaded state yet")
+    if apk is not None and int(asset.get("size", -1)) != apk.stat().st_size:
+        raise PublishError("Existing release APK size does not match the supplied local APK")
     digest = asset.get("digest") or ""
-    if digest.startswith("sha256:"):
+    if digest.lower().startswith("sha256:"):
         remote_hash = digest.split(":", 1)[1].lower()
     else:
         with tempfile.TemporaryDirectory(prefix="frippflix-verify-") as td:
-            run([require_tool("gh"), "release", "download", rel["tag_name"], "--repo", REPO,
-                 "--pattern", APK_NAME, "--dir", td])
-            remote_hash = sha256(Path(td) / APK_NAME)
+            downloaded = Path(td) / APK_NAME
+            download_asset(asset, downloaded)
+            remote_hash = sha256(downloaded)
     if apk is not None and remote_hash != sha256(apk):
         raise PublishError("Existing release APK does not match the supplied local APK; refusing to overwrite or resume")
     if meta is not None and apk is not None:
@@ -188,13 +230,33 @@ def verify_release_asset(rel: dict, apk: Path | None, meta: dict | None = None) 
     return asset, remote_hash
 
 
-def upload_apk(tag: str, apk: Path) -> None:
-    # gh uses the local basename as the asset name; stage a temporary symlink
-    # so arbitrary source filenames still publish under the required name.
-    with tempfile.TemporaryDirectory(prefix="frippflix-upload-") as td:
-        upload_path = Path(td) / APK_NAME
-        upload_path.symlink_to(apk)
-        run([require_tool("gh"), "release", "upload", tag, str(upload_path), "--repo", REPO])
+def upload_url(rel: dict) -> str:
+    raw = (rel.get("upload_url") or "").split("{", 1)[0]
+    parts = urlsplit(raw)
+    if parts.scheme != "https" or parts.hostname != "uploads.github.com":
+        raise PublishError("Draft release has no valid GitHub upload URL; keep the draft and inspect it manually")
+    query = dict(parse_qsl(parts.query))
+    query["name"] = APK_NAME
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+def upload_apk(rel: dict, apk: Path) -> dict:
+    # `gh api` obtains authentication through gh's credential store. The token
+    # is never requested, copied into our process, logged, or written to disk.
+    response = run([require_tool("gh"), "api", "--method", "POST", upload_url(rel),
+                    "--input", str(apk), "--header", "Accept: application/vnd.github+json",
+                    "--header", "Content-Type: application/octet-stream"])
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError as e:
+        raise PublishError("GitHub asset upload returned invalid JSON; preserve the draft and inspect its assets") from e
+
+
+def download_asset(asset: dict, destination: Path) -> None:
+    if not asset.get("id"):
+        raise PublishError("Release asset has no ID for authenticated checksum verification")
+    run([require_tool("gh"), "api", f"repos/{REPO}/releases/assets/{asset['id']}",
+         "--header", "Accept: application/octet-stream", "--output", str(destination)])
 
 
 def check_git_sync() -> tuple[str, str]:
@@ -453,15 +515,19 @@ def execute(args: argparse.Namespace) -> None:
             run([require_tool("gh"), "release", "create", tag, "--repo", REPO, "--draft", "--title", f"Frippflix {meta['versionName']}", "--notes-file", notes_path, "--target", branch])
         finally:
             Path(notes_path).unlink(missing_ok=True)
-        rel = release(tag)
-        if not rel or not rel.get("draft"):
+        rel = wait_for_release(tag)
+        if not rel.get("draft"):
             raise PublishError("Draft release creation could not be verified; inspect GitHub before retrying")
+    if args.mode == "resume":
+        rel = wait_for_release(tag, int(rel["id"]))
+    if not rel.get("draft"):
+        raise PublishError(f"Release {tag} is no longer a draft; use --repair-manifest if it is published")
     assets = [a for a in rel.get("assets", []) if a.get("name") == APK_NAME]
     if not assets:
-        upload_apk(tag, apk)
-    rel = release(tag)
-    if not rel:
-        raise PublishError("Release disappeared after upload")
+        upload_apk(rel, apk)
+    rel = wait_for_release(tag, int(rel["id"]))
+    if not rel.get("draft"):
+        raise PublishError(f"Release {tag} became published during recovery; use --repair-manifest")
     _, remote_hash = verify_release_asset(rel, apk, meta)
     if remote_hash != meta["sha256"]:
         raise PublishError("Uploaded APK checksum verification failed")

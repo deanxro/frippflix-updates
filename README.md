@@ -53,7 +53,7 @@ For an existing draft release, supply the same local APK and notes. Dry-run firs
 ./publish_release.py resume --tag v0.8.4.2 --apk /absolute/path/to/Frippflix.apk --notes-file /absolute/path/to/release-notes.md
 ```
 
-Then add `--publish` to continue. A draft with no APK receives the verified local APK; a draft with a matching APK is verified and published. If already published, the command stops and directs you to manifest repair. Any tag, APK hash, metadata, or certificate mismatch aborts without replacing assets. For remote verification, the tool uses GitHub's asset `digest` SHA-256 when available; otherwise it downloads the asset to a temporary directory and hashes it.
+Then add `--publish` to continue. Draft lookup uses GitHub's paginated releases collection (which includes drafts) and matches the exact tag, followed by a bounded consistency check against the release ID endpoint. A draft with no APK receives the verified local APK through that draft's release ID upload URL; this does not create another draft or tag. A draft with a matching APK is verified and published. If already published, the command stops and directs you to manifest repair. Any tag, APK name, size, hash, metadata, or certificate mismatch aborts without replacing assets. For remote verification, the tool uses GitHub's asset `digest` SHA-256 when available; otherwise it downloads the asset by ID to a temporary directory and hashes it.
 
 ## Repair a failed manifest update
 
