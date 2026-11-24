@@ -27,6 +27,10 @@ class PublisherUnitTests(unittest.TestCase):
                 raise AssertionError("lookup must not rely on the by-tag endpoint")
             self.assertIn("--paginate", args)
             self.assertIn("--slurp", args)
+            self.assertIn("--method", args)
+            self.assertEqual(args[args.index("--method") + 1], "GET")
+            self.assertFalse(any(arg == "--field" or arg.startswith("--field=") for arg in args))
+            self.assertIn(f"repos/{publisher.REPO}/releases?per_page=100", args)
             return json.dumps([[{"id": 1, "tag_name": "v0.7.0", "draft": False}, draft]])
 
         with mock.patch.object(publisher, "require_tool", return_value="/fake/gh"), \
@@ -100,7 +104,7 @@ show-ref) exit 1;;
 esac''')
             shim("gh", '''case "$1 $2" in
 "api repos/deanxro/frippflix-updates") echo '{"default_branch":"main"}';;
-"api --paginate") echo '[[]]';;
+"api --method") echo '[[]]';;
 "api repos/deanxro/frippflix-updates/git/ref/tags/v0.8.4.2") echo "Not Found" >&2; exit 1;;
 *) echo "$*" >> "$MUTATION_LOG"; exit 99;;
 esac''')

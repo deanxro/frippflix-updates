@@ -140,8 +140,8 @@ def release(tag: str) -> dict | None:
     # The by-tag endpoint omits drafts on some GitHub responses. The releases
     # collection includes authenticated drafts and supports pagination.
     try:
-        pages = json.loads(run([require_tool("gh"), "api", "--paginate", "--slurp",
-                                f"repos/{REPO}/releases", "--field", "per_page=100"]))
+        pages = json.loads(run([require_tool("gh"), "api", "--method", "GET", "--paginate", "--slurp",
+                                f"repos/{REPO}/releases?per_page=100"]))
     except json.JSONDecodeError as e:
         raise PublishError("GitHub returned invalid release-list JSON") from e
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
